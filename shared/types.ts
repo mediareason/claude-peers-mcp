@@ -1,6 +1,9 @@
 // Unique ID for each Claude Code instance (generated on registration)
 export type PeerId = string;
 
+// Synthetic peer ID used for system notifications (disconnect alerts, etc.)
+export const SYSTEM_PEER_ID: PeerId = "system";
+
 export interface Peer {
   id: PeerId;
   pid: number;
@@ -19,6 +22,7 @@ export interface Message {
   text: string;
   sent_at: string; // ISO timestamp
   delivered: boolean;
+  read: boolean;
 }
 
 // --- Broker API types ---
@@ -56,6 +60,35 @@ export interface SendMessageRequest {
   from_id: PeerId;
   to_id: PeerId;
   text: string;
+}
+
+export interface BroadcastRequest {
+  from_id: PeerId;
+  scope: "machine" | "directory" | "repo";
+  cwd: string;
+  git_root: string | null;
+  text: string;
+}
+
+export interface MessageStatusRequest {
+  from_id: PeerId;
+  to_id?: PeerId; // Optional: filter to messages sent to a specific peer
+}
+
+export interface MessageStatusResponse {
+  messages: Array<{
+    id: number;
+    to_id: PeerId;
+    text: string;
+    sent_at: string;
+    delivered: boolean;
+    read: boolean;
+  }>;
+}
+
+export interface MarkReadRequest {
+  id: PeerId; // the reader's peer ID
+  message_ids: number[];
 }
 
 export interface PollMessagesRequest {

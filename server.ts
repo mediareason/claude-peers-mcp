@@ -24,6 +24,7 @@ import type {
   Peer,
   RegisterResponse,
   PollMessagesResponse,
+  MessageStatusResponse,
   Message,
 } from "./shared/types.ts";
 import {
@@ -157,8 +158,12 @@ Read the from_id, from_summary, and from_cwd attributes to understand who sent t
 Available tools:
 - list_peers: Discover other Claude Code instances (scope: machine/directory/repo)
 - send_message: Send a message to another instance by ID
+- broadcast: Send a message to all peers in a scope (machine/directory/repo)
 - set_summary: Set a 1-2 sentence summary of what you're working on (visible to other peers)
+- message_status: Check delivery/read status of messages you've sent
 - check_messages: Manually check for new messages
+
+System notifications: You may receive disconnect alerts when a peer goes offline. These come from "system" and include the departed peer's last summary and working directory.
 
 When you start, proactively call set_summary to describe what you're working on. This helps other instances understand your context.`,
   }
@@ -216,6 +221,40 @@ const TOOLS = [
         },
       },
       required: ["summary"],
+    },
+  },
+  {
+    name: "broadcast",
+    description:
+      "Send a message to all Claude Code instances matching a scope (machine/directory/repo). More efficient than calling send_message for each peer.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        scope: {
+          type: "string" as const,
+          enum: ["machine", "directory", "repo"],
+          description: 'Scope of broadcast. "machine" = all peers. "directory" = same working directory. "repo" = same git repository.',
+        },
+        message: {
+          type: "string" as const,
+          description: "The message to broadcast",
+        },
+      },
+      required: ["scope", "message"],
+    },
+  },
+  {
+    name: "message_status",
+    description:
+      "Check the delivery and read status of messages you've sent. See if recipients have received and read your messages.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        to_id: {
+          type: "string" as const,
+          description: "Optional: filter to messages sent to a specific peer",
+        },
+      },
     },
   },
   {
@@ -356,6 +395,86 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
     }
 
+    case "broadcast": {
+      const { scope, message } = args as { scope: string; message: string };
+      if (!myId) {
+        return {
+          content: [{ type: "text" as const, text: "Not registered with broker yet" }],
+          isError: true,
+        };
+      }
+      try {
+        const result = await brokerFetch<{ ok: boolean; count: number }>("/broadcast", {
+          from_id: myId,
+          scope,
+          cwd: myCwd,
+          git_root: myGitRoot,
+          text: message,
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Broadcast sent to ${result.count} peer(s) (scope: ${scope})`,
+            },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error broadcasting: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    case "message_status": {
+      const { to_id } = args as { to_id?: string };
+      if (!myId) {
+        return {
+          content: [{ type: "text" as const, text: "Not registered with broker yet" }],
+          isError: true,
+        };
+      }
+      try {
+        const result = await brokerFetch<MessageStatusResponse>("/message-status", {
+          from_id: myId,
+          to_id,
+        });
+        if (result.messages.length === 0) {
+          return {
+            content: [{ type: "text" as const, text: "No sent messages found." }],
+          };
+        }
+        const lines = result.messages.map((m) => {
+          const status = m.read ? "read" : m.delivered ? "delivered" : "pending";
+          return `To ${m.to_id} [${status}] (${m.sent_at}):\n  ${m.text.slice(0, 100)}${m.text.length > 100 ? "..." : ""}`;
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `${result.messages.length} sent message(s):\n\n${lines.join("\n\n")}`,
+            },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error checking status: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
     case "check_messages": {
       if (!myId) {
         return {
@@ -370,6 +489,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             content: [{ type: "text" as const, text: "No new messages." }],
           };
         }
+
+        // Mark as read since user explicitly requested them
+        const ids = result.messages.map((m) => m.id);
+        await brokerFetch("/mark-read", { id: myId, message_ids: ids });
+
         const lines = result.messages.map(
           (m) => `From ${m.from_id} (${m.sent_at}):\n${m.text}`
         );
@@ -411,19 +535,25 @@ async function pollAndPushMessages() {
       // Look up the sender's info for context
       let fromSummary = "";
       let fromCwd = "";
-      try {
-        const peers = await brokerFetch<Peer[]>("/list-peers", {
-          scope: "machine",
-          cwd: myCwd,
-          git_root: myGitRoot,
-        });
-        const sender = peers.find((p) => p.id === msg.from_id);
-        if (sender) {
-          fromSummary = sender.summary;
-          fromCwd = sender.cwd;
+
+      if (msg.from_id === "system") {
+        fromSummary = "System notification";
+        fromCwd = "";
+      } else {
+        try {
+          const peers = await brokerFetch<Peer[]>("/list-peers", {
+            scope: "machine",
+            cwd: myCwd,
+            git_root: myGitRoot,
+          });
+          const sender = peers.find((p) => p.id === msg.from_id);
+          if (sender) {
+            fromSummary = sender.summary;
+            fromCwd = sender.cwd;
+          }
+        } catch {
+          // Non-critical, proceed without sender info
         }
-      } catch {
-        // Non-critical, proceed without sender info
       }
 
       // Push as channel notification — this is what makes it immediate
@@ -439,6 +569,13 @@ async function pollAndPushMessages() {
           },
         },
       });
+
+      // Mark as read after successful push
+      try {
+        await brokerFetch("/mark-read", { id: myId, message_ids: [msg.id] });
+      } catch {
+        // Non-critical
+      }
 
       log(`Pushed message from ${msg.from_id}: ${msg.text.slice(0, 80)}`);
     }
