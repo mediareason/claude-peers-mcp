@@ -124,19 +124,41 @@ const markDelivered = db.prepare(`
 
 // --- Generate peer ID ---
 
-function generateId(): string {
+function generateSuffix(len = 4): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  let id = "";
-  for (let i = 0; i < 8; i++) {
-    id += chars[Math.floor(Math.random() * chars.length)];
+  let s = "";
+  for (let i = 0; i < len; i++) {
+    s += chars[Math.floor(Math.random() * chars.length)];
   }
+  return s;
+}
+
+function generateId(gitRoot: string | null, cwd: string): string {
+  // Derive a human-readable base from the repo or directory name
+  const source = gitRoot || cwd;
+  const basename = source.split("/").filter(Boolean).pop() || "claude";
+  // Sanitize: lowercase, replace non-alphanumeric with hyphens, trim hyphens
+  const slug = basename.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const base = slug || "claude";
+
+  // Append a short random suffix for uniqueness
+  let id = `${base}-${generateSuffix()}`;
+
+  // Ensure no collision with existing peers
+  const existing = db.query("SELECT id FROM peers WHERE id = ?");
+  let attempts = 0;
+  while (existing.get(id) && attempts < 10) {
+    id = `${base}-${generateSuffix()}`;
+    attempts++;
+  }
+
   return id;
 }
 
 // --- Request handlers ---
 
 function handleRegister(body: RegisterRequest): RegisterResponse {
-  const id = generateId();
+  const id = generateId(body.git_root, body.cwd);
   const now = new Date().toISOString();
 
   // Remove any existing registration for this PID (re-registration)
