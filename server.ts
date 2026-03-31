@@ -196,7 +196,7 @@ const TOOLS = [
     inputSchema: {
       type: "object" as const,
       properties: {
-        to_id: {
+        to: {
           type: "string" as const,
           description: "The peer ID of the target Claude Code instance (from list_peers)",
         },
@@ -205,7 +205,7 @@ const TOOLS = [
           description: "The message to send",
         },
       },
-      required: ["to_id", "message"],
+      required: ["to", "message"],
     },
   },
   {
@@ -250,7 +250,7 @@ const TOOLS = [
     inputSchema: {
       type: "object" as const,
       properties: {
-        to_id: {
+        to: {
           type: "string" as const,
           description: "Optional: filter to messages sent to a specific peer",
         },
@@ -334,7 +334,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
 
     case "send_message": {
-      const { to_id, message } = args as { to_id: string; message: string };
+      const a = args as Record<string, string>;
+      const to_id = a.to ?? a.to_id;
+      const message = a.message;
+      if (!to_id) {
+        return {
+          content: [{ type: "text" as const, text: "Missing 'to' parameter (peer ID)" }],
+          isError: true,
+        };
+      }
       if (!myId) {
         return {
           content: [{ type: "text" as const, text: "Not registered with broker yet" }],
@@ -433,7 +441,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
 
     case "message_status": {
-      const { to_id } = args as { to_id?: string };
+      const a = args as Record<string, string>;
+      const to_id = a.to ?? a.to_id;
       if (!myId) {
         return {
           content: [{ type: "text" as const, text: "Not registered with broker yet" }],
